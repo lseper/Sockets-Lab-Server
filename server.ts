@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { v4 } from "uuid";
 
-import { EventType, NominateEvent, VoteEvent } from "./types";
+import { EventType, NominateEvent, VoteEvent, GreetEvent } from "./types";
 import type {
 	UserType,
 	NomineeType,
@@ -18,6 +18,8 @@ let nominees: NomineeType[] = [];
 
 const MAX_VOTES = 10;
 const MAX_NOMINATIONS = 3;
+
+let numUsers = 0;
 
 /**
  * Broadcasting helper methods
@@ -47,7 +49,7 @@ const purge = (socket: WebSocket) => {
 		return;
 	}
 	const id = userEntry[0];
-
+	console.log(`purging user: ${id}`);
 	// update any votes from user
 	const votesByUser = votesBy.get(id);
 	if (votesByUser) {
@@ -78,6 +80,7 @@ const purge = (socket: WebSocket) => {
 	}
 	userSockets.delete(id);
 	users.delete(id);
+	numUsers -= 1;
 };
 
 const getUser = (socket: WebSocket, userID?: string): string => {
@@ -90,7 +93,6 @@ const getUser = (socket: WebSocket, userID?: string): string => {
 		const createdUser: UserType = {
 			id: newUserID,
 			nominations: 0,
-			name: `User_${newUserID}`,
 			votes: 0,
 		};
 		// add to uId-socket map
@@ -107,17 +109,28 @@ const nominate = (
 	nominater: UserType,
 	nomineeName: string
 ) => {
+	console.log("nominate_func info: ", nominater.id, nominater.nominations);
 	if (nominater.nominations >= MAX_NOMINATIONS) {
 		return;
 	}
-	if (!nominees.some((nominee) => nominee.name === nomineeName)) {
-		nominees.push({ name: nomineeName, votes: 1 });
-		nominatedBy.set(nomineeName, [nominater.name]);
+	if (
+		!nominees.some((nominee) => nominee.name === nomineeName) &&
+		nominater.username
+	) {
+		console.log("nominating...");
+		nominees.push({
+			name: nomineeName,
+			votes: 1,
+			nominater: nominater.username,
+		});
+		nominatedBy.set(nomineeName, [nominater.id]);
 		nominater.nominations -= 1;
 		const nominaterResponseData: NomineesToClientsEventType = {
 			nominees: nominees,
 			type: "NOMINEES",
 		};
+		console.log("successfully nominated");
+		console.log(nominees, nominatedBy);
 		broadcast(server, nominaterResponseData);
 	}
 };
@@ -133,13 +146,19 @@ const unnominate = (
 	const candidateNominatedBy = nominatedBy.get(nomineeName);
 	if (candidateNominatedBy) {
 		const newNominees = candidateNominatedBy.filter(
-			(user) => user !== nominater.name
+			(user) => user !== nominater.id
 		);
 		if (newNominees.length === 0) {
 			// remove if no other voters
 			nominees = nominees.filter(
 				(nominee) => nominee.name !== nomineeName
 			);
+		} else {
+			const nominee = nominees.find((nom) => nom.name === nomineeName);
+			if (nominee) {
+				const newNominater = users.get(newNominees[0]);
+				nominee.nominater = newNominater?.username ?? newNominees[0];
+			}
 		}
 		nominater.nominations += 1;
 		const nominaterResponseData: NomineesToClientsEventType = {
@@ -177,13 +196,31 @@ const vote = (
 				voter.id,
 				voterVotes.filter((votee) => votee !== candidate)
 			);
+			const nominaters = nominatedBy.get(candidate);
+			if (nominaters) {
+				const lengthBefore = nominaters.length;
+				const newNominaters = nominaters.filter(
+					(nom) => nom !== voter.id
+				);
+				if (newNominaters.length < lengthBefore) {
+					if (newNominaters.length > 0) {
+						const newNominater = users.get(newNominaters[0]);
+						candidateToReceiveVote.nominater =
+							newNominater?.username ?? newNominaters[0];
+					} else {
+						nominees = nominees.filter(
+							(nominee) => nominee.name !== candidate
+						);
+					}
+				}
+			}
 		} else {
 			// upvote
 			// also add as nominee, so that if original nominee unnominates,
 			// isn't purged
 			const nominatorsToUpdate = nominatedBy.get(candidate);
 			if (nominatorsToUpdate) {
-				nominatorsToUpdate.push(voter.name);
+				nominatorsToUpdate.push(voter.id);
 			}
 			candidateToReceiveVote.votes += 1;
 			voter.votes -= 1;
@@ -201,54 +238,72 @@ const vote = (
 	}
 };
 
-let numUsers = 0;
-
 // do this whenever a user connects
 server.on("connection", (response) => {
 	numUsers += 1;
-	const newUserID =
-		// do this whenever a user sends a message
-		response.on("message", async (data) => {
-			const dataJSON = JSON.parse(data.toString());
-			// MAKE SURE YOU SEND MESSAGES WITH A TYPE FIELD!
-			const messageType = dataJSON.type;
-			switch (messageType) {
-				case EventType.enum.NOMINATE: {
-					const result = NominateEvent.safeParse(dataJSON);
-					if (!result.success) {
-						break;
-					}
-					const nominater = users.get(result.data.nominater);
-					const { nominee } = result.data;
-					if (nominater) {
-						if (result.data.unnominate) {
-							unnominate(server, nominater, nominee);
-						} else {
-							nominate(server, nominater, nominee);
-						}
-						const nominaterResponseData: UpdateActionsLeftToClientEventType =
-							{ user: nominater, type: "UPDATE" };
-						reply(response, nominaterResponseData);
-					}
+	// initialize user id
+	const newUserID = getUser(response);
+	console.log(`User #${numUsers} has joined! ID: ${newUserID}`);
+	reply(response, { id: newUserID, nominees, type: "GREET" });
+
+	// do this whenever a user sends a message
+	response.on("message", async (data) => {
+		const dataJSON = JSON.parse(data.toString());
+		console.log(dataJSON);
+		// MAKE SURE YOU SEND MESSAGES WITH A TYPE FIELD!
+		const messageType = dataJSON.type;
+		switch (messageType) {
+			case EventType.enum.NOMINATE: {
+				const result = NominateEvent.safeParse(dataJSON);
+				if (!result.success) {
 					break;
 				}
-				case EventType.enum.VOTE: {
-					const result = VoteEvent.safeParse(dataJSON);
-					if (!result.success) {
-						break;
+				const nominater = users.get(result.data.nominater);
+				const { nominee } = result.data;
+				if (nominater && nominater.username) {
+					console.log("Nominater exists");
+					if (result.data.unnominate) {
+						console.log("stepping into unnominate...");
+						unnominate(server, nominater, nominee);
+					} else {
+						console.log("stepping into nominate...");
+						nominate(server, nominater, nominee);
 					}
-					const voter = users.get(result.data.voter);
-					const { upvote, candidate } = result.data;
-					if (voter) {
-						vote(server, voter, candidate, upvote);
-						const voterResponseData: UpdateActionsLeftToClientEventType =
-							{ user: voter, type: "UPDATE" };
-						reply(response, voterResponseData);
-					}
-					break;
+					const nominaterResponseData: UpdateActionsLeftToClientEventType =
+						{ user: nominater, type: "UPDATE" };
+					reply(response, nominaterResponseData);
 				}
+				break;
 			}
-		});
+			case EventType.enum.VOTE: {
+				const result = VoteEvent.safeParse(dataJSON);
+				if (!result.success) {
+					break;
+				}
+				const voter = users.get(result.data.voter);
+				const { upvote, candidate } = result.data;
+				if (voter && voter.username) {
+					vote(server, voter, candidate, upvote);
+					const voterResponseData: UpdateActionsLeftToClientEventType =
+						{ user: voter, type: "UPDATE" };
+					reply(response, voterResponseData);
+				}
+				break;
+			}
+			case EventType.enum.GREET: {
+				const result = GreetEvent.safeParse(dataJSON);
+				if (!result.success) {
+					break;
+				}
+				const user = users.get(result.data.id);
+				if (!user) {
+					break;
+				}
+				user.username = result.data.username;
+				break;
+			}
+		}
+	});
 
 	response.on("close", (_) => {
 		purge(response);
