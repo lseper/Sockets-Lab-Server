@@ -10,7 +10,7 @@ export const User = z.object({
 export const Nominee = z.object({
 	name: z.string(),
 	votes: z.number(),
-	nominater: z.string(),
+	nominater: User,
 });
 
 export const EventType = z.enum(["GREET", "NOMINATE", "VOTE"]);

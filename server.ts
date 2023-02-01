@@ -13,11 +13,10 @@ const server = new WebSocketServer({ port: 8080 });
 const userSockets: Map<string, WebSocket> = new Map<string, WebSocket>();
 const users: Map<string, UserType> = new Map<string, UserType>();
 const votesBy: Map<string, string[]> = new Map<string, string[]>();
-const nominatedBy: Map<string, string[]> = new Map<string, string[]>();
 let nominees: NomineeType[] = [];
 
-const MAX_VOTES = 10;
-const MAX_NOMINATIONS = 3;
+const STARTING_VOTES = 10;
+const STARTING_NOMINATIONS = 3;
 
 let numUsers = 0;
 
@@ -61,23 +60,18 @@ const purge = (socket: WebSocket) => {
 		});
 	}
 
-	// update nominations
-	for (const [nominee, nominators] of nominatedBy.entries()) {
-		if (nominators.some((nominator) => nominator === id)) {
-			// update nominators for this person
-			const newNominators = nominators.filter((n) => n !== id);
-			nominatedBy.set(nominee, newNominators);
-			// update in nominees
-			const nomToFind = nominees.find((nom) => nom.name === nominee);
-			if (nomToFind) {
-				if (nomToFind.votes === 1) {
-					nominees = nominees.filter((nom) => nom.name === nominee);
-				} else {
-					nomToFind.votes -= 1;
-				}
-			}
-		}
-	}
+	// return votes to users who voted for nominee
+	const nomineesToUnnominate = nominees.filter(
+		(nom) => nom.nominater.id === id
+	);
+	nomineesToUnnominate.forEach((nomineeToUnnominate) => {
+		_return_votes(nomineeToUnnominate);
+		_remove_votes_for_nominee(nomineeToUnnominate);
+	});
+	// update nominees nominated
+	nominees = nominees.filter((nom) => nom.nominater.id !== id);
+	broadcast(server, { type: "NOMINEES", nominees });
+	votesBy.delete(id);
 	userSockets.delete(id);
 	users.delete(id);
 	numUsers -= 1;
@@ -92,8 +86,8 @@ const getUser = (socket: WebSocket, userID?: string): string => {
 		}
 		const createdUser: UserType = {
 			id: newUserID,
-			nominations: 0,
-			votes: 0,
+			nominations: STARTING_NOMINATIONS,
+			votes: STARTING_VOTES,
 		};
 		// add to uId-socket map
 		userSockets.set(newUserID, socket);
@@ -109,30 +103,77 @@ const nominate = (
 	nominater: UserType,
 	nomineeName: string
 ) => {
-	console.log("nominate_func info: ", nominater.id, nominater.nominations);
-	if (nominater.nominations >= MAX_NOMINATIONS) {
+	if (nominater.nominations <= 0) {
 		return;
 	}
 	if (
 		!nominees.some((nominee) => nominee.name === nomineeName) &&
 		nominater.username
 	) {
-		console.log("nominating...");
 		nominees.push({
 			name: nomineeName,
-			votes: 1,
-			nominater: nominater.username,
+			votes: 0,
+			nominater: nominater,
 		});
-		nominatedBy.set(nomineeName, [nominater.id]);
 		nominater.nominations -= 1;
 		const nominaterResponseData: NomineesToClientsEventType = {
 			nominees: nominees,
 			type: "NOMINEES",
 		};
-		console.log("successfully nominated");
-		console.log(nominees, nominatedBy);
 		broadcast(server, nominaterResponseData);
 	}
+};
+
+const _remove_votes_for_nominee = (unnominated: NomineeType): void => {
+	[...votesBy.entries()].forEach((entry) => {
+		const [userID, votedFor] = entry;
+		votesBy.set(
+			userID,
+			votedFor.filter((nom) => nom !== unnominated.name)
+		);
+	});
+};
+
+const _return_votes = (unnominated: NomineeType): void => {
+	const usersToReplyTo: UserType[] = [];
+	[...votesBy.entries()].forEach((entry) => {
+		const [userID, usersVotedFor] = entry;
+		const userToUpdate = users.get(userID);
+		if (userToUpdate) {
+			console.log(
+				`Scanning if ${userID} voted for ${unnominated.name}...`
+			);
+			const numberOfVotesToReturn = usersVotedFor.filter(
+				(nom) => nom === unnominated.name
+			).length;
+			console.log(
+				`Returning ${numberOfVotesToReturn} votes (${
+					userToUpdate.votes
+				} -> ${userToUpdate.votes + numberOfVotesToReturn})`
+			);
+			userToUpdate.votes += numberOfVotesToReturn;
+			usersToReplyTo.push(userToUpdate);
+		}
+	});
+	// give vote back to nominater
+	// const nominaterIncluded = usersToReplyTo.find(
+	// 	(user) => user.id === unnominated.nominater.id
+	// );
+	// if (!nominaterIncluded) {
+	// 	const nominaterToGiveVotesBack = users.get(unnominated.nominater.id);
+	// 	if (nominaterToGiveVotesBack) {
+	// 		nominaterToGiveVotesBack.votes += 1;
+	// 		usersToReplyTo.push(nominaterToGiveVotesBack);
+	// 	}
+	// }
+	// update votes on user
+	usersToReplyTo.forEach((user) => {
+		const userSocket = userSockets.get(user.id);
+		if (userSocket) {
+			console.log(`${user.username}'s updated votes: ${user.votes}`);
+			reply(userSocket, { type: "UPDATE", user: user });
+		}
+	});
 };
 
 const unnominate = (
@@ -140,31 +181,25 @@ const unnominate = (
 	nominater: UserType,
 	nomineeName: string
 ) => {
-	if (nominater.nominations >= MAX_NOMINATIONS) {
+	if (nominater.nominations >= STARTING_NOMINATIONS) {
 		return;
 	}
-	const candidateNominatedBy = nominatedBy.get(nomineeName);
-	if (candidateNominatedBy) {
-		const newNominees = candidateNominatedBy.filter(
-			(user) => user !== nominater.id
-		);
-		if (newNominees.length === 0) {
-			// remove if no other voters
-			nominees = nominees.filter(
-				(nominee) => nominee.name !== nomineeName
-			);
-		} else {
-			const nominee = nominees.find((nom) => nom.name === nomineeName);
-			if (nominee) {
-				const newNominater = users.get(newNominees[0]);
-				nominee.nominater = newNominater?.username ?? newNominees[0];
-			}
-		}
+	const nomineeToUnnominate = nominees.find(
+		(nom) => nom.name === nomineeName
+	);
+	if (
+		nomineeToUnnominate &&
+		nomineeToUnnominate.nominater.id === nominater.id
+	) {
 		nominater.nominations += 1;
+		nominees = nominees.filter((nom) => nom.name !== nomineeName);
 		const nominaterResponseData: NomineesToClientsEventType = {
 			nominees: nominees,
 			type: "NOMINEES",
 		};
+		_return_votes(nomineeToUnnominate);
+		// remove votes for that nominee in votesBy
+		_remove_votes_for_nominee(nomineeToUnnominate);
 		broadcast(server, nominaterResponseData);
 	}
 };
@@ -175,13 +210,17 @@ const vote = (
 	candidate: string,
 	upvote: boolean
 ) => {
-	if (upvote && voter.votes >= MAX_VOTES) {
+	if (upvote && voter.votes <= 0) {
 		return;
 	}
 	const candidateToReceiveVote = nominees.find(
 		(nominee) => nominee.name === candidate
 	);
 	const voterVotes = votesBy.get(voter.id);
+	console.log(`Before ${upvote ? "upvoting" : "downvoting"}: ${voterVotes}`);
+	console.log(
+		`vote func inputs: upvote: ${upvote}, candidate votes: ${candidateToReceiveVote?.votes}, voterVotes: ${voterVotes}`
+	);
 	if (candidateToReceiveVote) {
 		if (
 			!upvote &&
@@ -189,39 +228,30 @@ const vote = (
 			voterVotes &&
 			voterVotes.some((votee) => votee == candidate)
 		) {
+			console.log("PAST DOWNVOTE CONDITION");
 			// downvote
 			candidateToReceiveVote.votes -= 1;
 			voter.votes += 1;
-			votesBy.set(
-				voter.id,
-				voterVotes.filter((votee) => votee !== candidate)
+			// remove one vote
+			const firstOccurrenceOfCandidate = voterVotes.findIndex(
+				(nom) => nom === candidate
 			);
-			const nominaters = nominatedBy.get(candidate);
-			if (nominaters) {
-				const lengthBefore = nominaters.length;
-				const newNominaters = nominaters.filter(
-					(nom) => nom !== voter.id
+			console.log(candidate, " appears at ", firstOccurrenceOfCandidate);
+			if (firstOccurrenceOfCandidate !== -1) {
+				// bounds check
+				let newCandidatesVotedByVoter = voterVotes.slice(
+					0,
+					firstOccurrenceOfCandidate
 				);
-				if (newNominaters.length < lengthBefore) {
-					if (newNominaters.length > 0) {
-						const newNominater = users.get(newNominaters[0]);
-						candidateToReceiveVote.nominater =
-							newNominater?.username ?? newNominaters[0];
-					} else {
-						nominees = nominees.filter(
-							(nominee) => nominee.name !== candidate
-						);
-					}
+				if (firstOccurrenceOfCandidate !== voterVotes.length - 1) {
+					newCandidatesVotedByVoter.push(
+						...voterVotes.slice(firstOccurrenceOfCandidate + 1)
+					);
 				}
+				votesBy.set(voter.id, newCandidatesVotedByVoter);
 			}
-		} else {
+		} else if (upvote) {
 			// upvote
-			// also add as nominee, so that if original nominee unnominates,
-			// isn't purged
-			const nominatorsToUpdate = nominatedBy.get(candidate);
-			if (nominatorsToUpdate) {
-				nominatorsToUpdate.push(voter.id);
-			}
 			candidateToReceiveVote.votes += 1;
 			voter.votes -= 1;
 			if (!voterVotes) {
@@ -249,7 +279,7 @@ server.on("connection", (response) => {
 	// do this whenever a user sends a message
 	response.on("message", async (data) => {
 		const dataJSON = JSON.parse(data.toString());
-		console.log(dataJSON);
+		// console.log(dataJSON);
 		// MAKE SURE YOU SEND MESSAGES WITH A TYPE FIELD!
 		const messageType = dataJSON.type;
 		switch (messageType) {
@@ -261,12 +291,9 @@ server.on("connection", (response) => {
 				const nominater = users.get(result.data.nominater);
 				const { nominee } = result.data;
 				if (nominater && nominater.username) {
-					console.log("Nominater exists");
 					if (result.data.unnominate) {
-						console.log("stepping into unnominate...");
 						unnominate(server, nominater, nominee);
 					} else {
-						console.log("stepping into nominate...");
 						nominate(server, nominater, nominee);
 					}
 					const nominaterResponseData: UpdateActionsLeftToClientEventType =
@@ -286,6 +313,7 @@ server.on("connection", (response) => {
 					vote(server, voter, candidate, upvote);
 					const voterResponseData: UpdateActionsLeftToClientEventType =
 						{ user: voter, type: "UPDATE" };
+					console.log(votesBy);
 					reply(response, voterResponseData);
 				}
 				break;
