@@ -50,6 +50,7 @@ export const UpdateActionsLeftToClient = z.object({
 export type GreetEventType = z.infer<typeof GreetEvent>;
 export type NominateEventType = z.infer<typeof NominateEvent>;
 export type VoteEventType = z.infer<typeof VoteEvent>;
+export type EventTypeType = z.infer<typeof EventType>;
 
 // TO-CLIENT Types
 export type NomineesToClientsEventType = z.infer<typeof NomineesToClients>;

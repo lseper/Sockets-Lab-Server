@@ -7,6 +7,10 @@ import type {
 	NomineeType,
 	NomineesToClientsEventType,
 	UpdateActionsLeftToClientEventType,
+	NominateEventType,
+	VoteEventType,
+	GreetEventType,
+	EventTypeType
 } from "./types";
 
 const server = new WebSocketServer({ port: 8080 });
@@ -19,6 +23,47 @@ const STARTING_VOTES = 10;
 const STARTING_NOMINATIONS = 3;
 
 let numUsers = 0;
+
+const logNominee = (nominee: NomineeType, depth=2) => {
+	const d = '\t'.repeat(depth);
+	console.log(`${d}NOMINEE: ${nominee.name}`)
+	console.log(`\t${d}votes: ${nominee.votes}`)
+	console.log(`\t${d}nominater: ${nominee.nominater.username ?? 'User#' + nominee.nominater.id}`)
+}
+
+const logNominees = (depth=1) => {
+	const d = '\t'.repeat(1);
+	console.log(`${d}ALL NOMINEES`);
+	nominees.forEach(nominee => {
+		logNominee(nominee);
+	})
+}
+
+const logUser = (user: UserType) => {
+	console.log(`\tLOGGING USER: ${user.username ?? 'undefined'}`)
+	console.log(`\t\tid: ${user.id}`)
+	console.log(`\t\tnominations remaining: ${user.nominations}`)
+	console.log(`\t\tNOMINATIONS`)
+	const userNominations = nominees.filter(nominee => nominee.nominater.id !== user.id).forEach(nominee => {
+		console.log(`\t\t\t${nominee.name}`)
+	});
+	console.log(`\t\tvotes remaining: ${user.votes}`);
+	console.log(`\t\tVOTES`);
+	const userVotes = votesBy.get(user.id);
+	if (userVotes) {
+		userVotes.forEach(nominee => {
+			console.log(`\t\t\t${nominee}`)
+		})
+	}
+}
+
+const logUsers = () => {
+	console.log('CONNECTED USERS');
+	users.forEach(user => {
+		logUser(user);
+	})
+
+} 
 
 /**
  * Broadcasting helper methods
@@ -48,7 +93,7 @@ const purge = (socket: WebSocket) => {
 		return;
 	}
 	const id = userEntry[0];
-	console.log(`purging user: ${id}`);
+	console.log(`\tpurging user: ${users.get(id)?.username ?? 'NO_USERNAME'}`);
 	// update any votes from user
 	const votesByUser = votesBy.get(id);
 	if (votesByUser) {
@@ -141,13 +186,13 @@ const _return_votes = (unnominated: NomineeType): void => {
 		const userToUpdate = users.get(userID);
 		if (userToUpdate) {
 			console.log(
-				`Scanning if ${userID} voted for ${unnominated.name}...`
+				`\tScanning if ${userToUpdate.username} voted for ${unnominated.name}...`
 			);
 			const numberOfVotesToReturn = usersVotedFor.filter(
 				(nom) => nom === unnominated.name
 			).length;
 			console.log(
-				`Returning ${numberOfVotesToReturn} votes (${
+				`\tReturning ${numberOfVotesToReturn} votes (${
 					userToUpdate.votes
 				} -> ${userToUpdate.votes + numberOfVotesToReturn})`
 			);
@@ -170,7 +215,7 @@ const _return_votes = (unnominated: NomineeType): void => {
 	usersToReplyTo.forEach((user) => {
 		const userSocket = userSockets.get(user.id);
 		if (userSocket) {
-			console.log(`${user.username}'s updated votes: ${user.votes}`);
+			console.log(`\t${user.username}'s updated votes: ${user.votes}`);
 			reply(userSocket, { type: "UPDATE", user: user });
 		}
 	});
@@ -217,10 +262,6 @@ const vote = (
 		(nominee) => nominee.name === candidate
 	);
 	const voterVotes = votesBy.get(voter.id);
-	console.log(`Before ${upvote ? "upvoting" : "downvoting"}: ${voterVotes}`);
-	console.log(
-		`vote func inputs: upvote: ${upvote}, candidate votes: ${candidateToReceiveVote?.votes}, voterVotes: ${voterVotes}`
-	);
 	if (candidateToReceiveVote) {
 		if (
 			!upvote &&
@@ -228,7 +269,6 @@ const vote = (
 			voterVotes &&
 			voterVotes.some((votee) => votee == candidate)
 		) {
-			console.log("PAST DOWNVOTE CONDITION");
 			// downvote
 			candidateToReceiveVote.votes -= 1;
 			voter.votes += 1;
@@ -236,7 +276,6 @@ const vote = (
 			const firstOccurrenceOfCandidate = voterVotes.findIndex(
 				(nom) => nom === candidate
 			);
-			console.log(candidate, " appears at ", firstOccurrenceOfCandidate);
 			if (firstOccurrenceOfCandidate !== -1) {
 				// bounds check
 				let newCandidatesVotedByVoter = voterVotes.slice(
@@ -284,6 +323,7 @@ server.on("connection", (response) => {
 		const messageType = dataJSON.type;
 		switch (messageType) {
 			case EventType.enum.NOMINATE: {
+				console.log("NOMINATION")
 				const result = NominateEvent.safeParse(dataJSON);
 				if (!result.success) {
 					break;
@@ -298,11 +338,14 @@ server.on("connection", (response) => {
 					}
 					const nominaterResponseData: UpdateActionsLeftToClientEventType =
 						{ user: nominater, type: "UPDATE" };
+					logNominees();
+					logUser(nominater);
 					reply(response, nominaterResponseData);
 				}
 				break;
 			}
 			case EventType.enum.VOTE: {
+				console.log("VOTE")
 				const result = VoteEvent.safeParse(dataJSON);
 				if (!result.success) {
 					break;
@@ -312,13 +355,18 @@ server.on("connection", (response) => {
 				if (voter && voter.username) {
 					vote(server, voter, candidate, upvote);
 					const voterResponseData: UpdateActionsLeftToClientEventType =
-						{ user: voter, type: "UPDATE" };
-					console.log(votesBy);
+					{ user: voter, type: "UPDATE" };
+					const nomToLog = nominees.find(nom => nom.name === candidate);
+					if(nomToLog) {
+						logNominee(nomToLog);	
+					}
+					logUser(voter);
 					reply(response, voterResponseData);
 				}
 				break;
 			}
 			case EventType.enum.GREET: {
+				console.log("GREET")
 				const result = GreetEvent.safeParse(dataJSON);
 				if (!result.success) {
 					break;
@@ -328,12 +376,15 @@ server.on("connection", (response) => {
 					break;
 				}
 				user.username = result.data.username;
+				logUser(user)
 				break;
 			}
 		}
 	});
 
 	response.on("close", (_) => {
+		console.log('DISCONNECTION')
 		purge(response);
+		logUsers();
 	});
 });
