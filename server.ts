@@ -322,6 +322,11 @@ server.on("connection", (response) => {
 		// MAKE SURE YOU SEND MESSAGES WITH A TYPE FIELD!
 		const messageType = dataJSON.type;
 		switch (messageType) {
+			case EventType.enum.HEARTBEAT: {
+				console.log('Received Heartbeat');
+				reply(response, { type: "HEARTBEAT" })
+				break;
+			}
 			case EventType.enum.NOMINATE: {
 				console.log("NOMINATION")
 				const result = NominateEvent.safeParse(dataJSON);

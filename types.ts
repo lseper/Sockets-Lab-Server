@@ -13,7 +13,7 @@ export const Nominee = z.object({
 	nominater: User,
 });
 
-export const EventType = z.enum(["GREET", "NOMINATE", "VOTE"]);
+export const EventType = z.enum(["GREET", "NOMINATE", "VOTE", "HEARTBEAT"]);
 
 export const GreetEvent = z.object({
 	id: z.string(),
@@ -47,6 +47,10 @@ export const UpdateActionsLeftToClient = z.object({
 	user: User,
 	type: z.literal("UPDATE"),
 });
+export const HeartBeatToClient = z.object({
+	type: z.literal("HEARTBEAT")
+})
+
 export type GreetEventType = z.infer<typeof GreetEvent>;
 export type NominateEventType = z.infer<typeof NominateEvent>;
 export type VoteEventType = z.infer<typeof VoteEvent>;
