@@ -13,7 +13,7 @@ export const Nominee = z.object({
 	nominater: User,
 });
 
-export const EventType = z.enum(["GREET", "NOMINATE", "VOTE", "HEARTBEAT"]);
+export const EventType = z.enum(["GREET", "NOMINATE", "VOTE", "HEARTBEAT", "IP_SPAM"]);
 
 export const GreetEvent = z.object({
 	id: z.string(),
@@ -49,6 +49,11 @@ export const UpdateActionsLeftToClient = z.object({
 });
 export const HeartBeatToClient = z.object({
 	type: z.literal("HEARTBEAT")
+})
+
+// IP Spam Event Message - only to client
+export const IpSpamToClient = z.object({
+	type: z.literal("IP_SPAM")
 })
 
 export type GreetEventType = z.infer<typeof GreetEvent>;

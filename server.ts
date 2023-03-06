@@ -370,11 +370,15 @@ server.on("connection", (response, request) => {
 	// console.log(`User #${numUsers} has joined! ID: ${newUserID}`);
 	reply(response, { id: newUserID, nominees, type: "GREET" });
 
+	/**
+	 * spam control
+	 */
 	const requestIPData = request.headers['x-forwarded-for'] || request.socket.remoteAddress;
 	const requestIP = get_IP(newUserID, requestIPData);
 	const ip_is_new = record_ip(newUserID, requestIP);
 	// short circuit on spams from same IP
 	if (!ip_is_new) {
+		reply(response, { type: "IP_SPAM" })
 		return;
 	}
 
