@@ -14,6 +14,7 @@ import type {
 } from "./types";
 
 const server = new WebSocketServer({ port: 8080 });
+const userIPs: Map<string, string> = new Map<string, string>();
 const userSockets: Map<string, WebSocket> = new Map<string, WebSocket>();
 const users: Map<string, UserType> = new Map<string, UserType>();
 const votesBy: Map<string, string[]> = new Map<string, string[]>();
@@ -85,6 +86,7 @@ const reply = <T>(client: WebSocket, data: T) => {
 };
 
 const purge = (socket: WebSocket) => {
+	// find socket
 	const userEntry = [...userSockets.entries()].find((entry) => {
 		const [_id, userSocket] = entry;
 		return socket === userSocket;
@@ -93,7 +95,7 @@ const purge = (socket: WebSocket) => {
 		return;
 	}
 	const id = userEntry[0];
-	console.log(`\tpurging user: ${users.get(id)?.username ?? 'NO_USERNAME'}`);
+	// console.log(`\tpurging user: ${users.get(id)?.username ?? 'NO_USERNAME'}`);
 	// update any votes from user
 	const votesByUser = votesBy.get(id);
 	if (votesByUser) {
@@ -118,6 +120,7 @@ const purge = (socket: WebSocket) => {
 	broadcast(server, { type: "NOMINEES", nominees });
 	votesBy.delete(id);
 	userSockets.delete(id);
+	userIPs.delete(id);
 	users.delete(id);
 	numUsers -= 1;
 };
@@ -185,17 +188,17 @@ const _return_votes = (unnominated: NomineeType): void => {
 		const [userID, usersVotedFor] = entry;
 		const userToUpdate = users.get(userID);
 		if (userToUpdate) {
-			console.log(
-				`\tScanning if ${userToUpdate.username} voted for ${unnominated.name}...`
-			);
+			// console.log(
+			// 	`\tScanning if ${userToUpdate.username} voted for ${unnominated.name}...`
+			// );
 			const numberOfVotesToReturn = usersVotedFor.filter(
 				(nom) => nom === unnominated.name
 			).length;
-			console.log(
-				`\tReturning ${numberOfVotesToReturn} votes (${
-					userToUpdate.votes
-				} -> ${userToUpdate.votes + numberOfVotesToReturn})`
-			);
+			// console.log(
+			// 	`\tReturning ${numberOfVotesToReturn} votes (${
+			// 		userToUpdate.votes
+			// 	} -> ${userToUpdate.votes + numberOfVotesToReturn})`
+			// );
 			userToUpdate.votes += numberOfVotesToReturn;
 			usersToReplyTo.push(userToUpdate);
 		}
@@ -215,7 +218,7 @@ const _return_votes = (unnominated: NomineeType): void => {
 	usersToReplyTo.forEach((user) => {
 		const userSocket = userSockets.get(user.id);
 		if (userSocket) {
-			console.log(`\t${user.username}'s updated votes: ${user.votes}`);
+			// console.log(`\t${user.username}'s updated votes: ${user.votes}`);
 			reply(userSocket, { type: "UPDATE", user: user });
 		}
 	});
@@ -261,6 +264,10 @@ const vote = (
 	const candidateToReceiveVote = nominees.find(
 		(nominee) => nominee.name === candidate
 	);
+	if (candidateToReceiveVote && candidateToReceiveVote.nominater.id === voter.id) {
+		// cannot vote for own nominee
+		return;
+	}
 	const voterVotes = votesBy.get(voter.id);
 	if (candidateToReceiveVote) {
 		if (
@@ -307,13 +314,69 @@ const vote = (
 	}
 };
 
+/**
+ * Gets the IP from a user's headers or remoteAddress property
+ * @param userID - the id of the user
+ * @param IPdata - the IP data returned from IP header or the remoteAddress property
+ * @returns the IP address
+ */
+const get_IP = (userID: string, IPdata: string[] | string | undefined): string => {
+	if (IPdata) {
+		if (typeof IPdata === 'object') {
+			if (IPdata[1]) {
+				return IPdata[1]
+			}
+			return IPdata[0]
+		} else {
+			return IPdata
+		}
+	}
+	return `user_${userID}_IP_address`;
+}
+
+const get_id_for_user_IP = (userIP: string): string | undefined => {
+	const userId = [...userIPs.entries()].find(entry => {
+		const [id, ip] = entry;
+		return ip === userIP;
+	});
+	if (userId) {
+		return userId[0]
+	}
+	return userId // undefined
+}
+
+/**
+ * records the users ip to prevent spam
+ * @param userID - generated user ID
+ * @param userIP - remote IP for user 
+ * @returns false if user has an IP recorded (is spam), True if they don't (isn't spam)
+ */
+const record_ip = (userID: string, userIP: string) => {
+	console.log(`user ID: ${userID}`)
+	const ownerOfIP = get_id_for_user_IP(userIP);
+	if (ownerOfIP) {
+		console.log(`user ${ownerOfIP} already owns IP ${userIP}`)
+		return false;
+	}
+	console.log(`a user for IP ${userIP} does not exist yet, setting...`)
+	userIPs.set(userID, userIP);
+	return true;
+}
 // do this whenever a user connects
-server.on("connection", (response) => {
+server.on("connection", (response, request) => {
 	numUsers += 1;
 	// initialize user id
 	const newUserID = getUser(response);
-	console.log(`User #${numUsers} has joined! ID: ${newUserID}`);
+	// console.log(`User #${numUsers} has joined! ID: ${newUserID}`);
 	reply(response, { id: newUserID, nominees, type: "GREET" });
+
+	const requestIPData = request.headers['x-forwarded-for'] || request.socket.remoteAddress;
+	const requestIP = get_IP(newUserID, requestIPData);
+	const ip_is_new = record_ip(newUserID, requestIP);
+	// short circuit on spams from same IP
+	if (!ip_is_new) {
+		return;
+	}
 
 	// do this whenever a user sends a message
 	response.on("message", async (data) => {
@@ -323,12 +386,12 @@ server.on("connection", (response) => {
 		const messageType = dataJSON.type;
 		switch (messageType) {
 			case EventType.enum.HEARTBEAT: {
-				console.log('Received Heartbeat');
+				// console.log('Received Heartbeat');
 				reply(response, { type: "HEARTBEAT" })
 				break;
 			}
 			case EventType.enum.NOMINATE: {
-				console.log("NOMINATION")
+				// console.log("NOMINATION")
 				const result = NominateEvent.safeParse(dataJSON);
 				if (!result.success) {
 					break;
@@ -343,14 +406,14 @@ server.on("connection", (response) => {
 					}
 					const nominaterResponseData: UpdateActionsLeftToClientEventType =
 						{ user: nominater, type: "UPDATE" };
-					logNominees();
-					logUser(nominater);
+					// logNominees();
+					// logUser(nominater);
 					reply(response, nominaterResponseData);
 				}
 				break;
 			}
 			case EventType.enum.VOTE: {
-				console.log("VOTE")
+				// console.log("VOTE")
 				const result = VoteEvent.safeParse(dataJSON);
 				if (!result.success) {
 					break;
@@ -361,17 +424,17 @@ server.on("connection", (response) => {
 					vote(server, voter, candidate, upvote);
 					const voterResponseData: UpdateActionsLeftToClientEventType =
 					{ user: voter, type: "UPDATE" };
-					const nomToLog = nominees.find(nom => nom.name === candidate);
-					if(nomToLog) {
-						logNominee(nomToLog);	
-					}
-					logUser(voter);
+					// const nomToLog = nominees.find(nom => nom.name === candidate);
+					// if(nomToLog) {
+					// 	logNominee(nomToLog);	
+					// }
+					// logUser(voter);
 					reply(response, voterResponseData);
 				}
 				break;
 			}
 			case EventType.enum.GREET: {
-				console.log("GREET")
+				// console.log("GREET")
 				const result = GreetEvent.safeParse(dataJSON);
 				if (!result.success) {
 					break;
@@ -381,15 +444,15 @@ server.on("connection", (response) => {
 					break;
 				}
 				user.username = result.data.username;
-				logUser(user)
+				// logUser(user)
 				break;
 			}
 		}
 	});
 
 	response.on("close", (_) => {
-		console.log('DISCONNECTION')
+		// console.log('DISCONNECTION')
 		purge(response);
-		logUsers();
+		// logUsers();
 	});
 });
